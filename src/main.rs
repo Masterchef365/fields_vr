@@ -45,6 +45,10 @@ struct ParticleCfg {
     /// Particle mass
     #[structopt(short = "m", long, default_value = "1.0")]
     mass: f32,
+
+    /// Probability the parcel will be removed each second
+    #[structopt(short = "p", long, default_value = "0.99")]
+    replace_p: f32,
 }
 
 fn main() -> Result<()> {
@@ -52,12 +56,18 @@ fn main() -> Result<()> {
     launch::<Opt, FieldVisualizer>(Settings::default().vr(args.vr).args(args))
 }
 
-fn field(pos: Vec3x8) -> Vec3x8 {
-    let obj_pos = Vec3x8::splat(Vec3::zero());
+fn point_charge(pos: Vec3x8, obj_pos: Vec3, charge: f32) -> Vec3x8 {
+    let charge = Vec3x8::splat(Vec3::broadcast(charge));
+    let obj_pos = Vec3x8::splat(obj_pos);
     let diff = pos - obj_pos;
     let dist_sq = diff.mag_sq();
-    let norm = diff.normalized() / dist_sq;
-    norm
+
+    charge * diff.normalized() / dist_sq
+}
+
+fn field(pos: Vec3x8) -> Vec3x8 {
+    point_charge(pos, Vec3::new(1., 1., 1.), 1.0)
+        + point_charge(pos, Vec3::new(-1., -1., -1.), -1.0)
 }
 
 struct FieldVisualizer {
@@ -94,7 +104,7 @@ impl App<Opt> for FieldVisualizer {
             point_indices: ctx.indices(&present.point_gb.indices, true)?,
 
             point_shader: ctx.shader(
-                DEFAULT_VERTEX_SHADER,
+                include_bytes!("shaders/points.vert.spv"),
                 DEFAULT_FRAGMENT_SHADER,
                 Primitive::Points,
             )?,
@@ -187,25 +197,49 @@ struct ParticleSim {
     cfg: ParticleCfg,
 }
 
+fn gen_parcel(cfg: &ParticleCfg, mut rng: impl Rng) -> (Vec3x8, Vec3x8) {
+    let mut sample =
+        || f32x8::from([(); 8].map(|_| rng.gen_range(-cfg.domain_radius..=cfg.domain_radius)));
+    let xyz = Vec3x8::new(sample(), sample(), sample());
+    (xyz, Vec3x8::zero())
+}
+
 impl ParticleSim {
     pub fn new(cfg: ParticleCfg) -> Self {
         let mut pos = Vec::with_capacity(cfg.n_parcels);
         let mut vel = Vec::with_capacity(cfg.n_parcels);
 
         let mut rng = rand::thread_rng();
+
         for _ in 0..cfg.n_parcels {
-            let mut sample = || {
-                f32x8::from([(); 8].map(|_| rng.gen_range(-cfg.domain_radius..=cfg.domain_radius)))
-            };
-            let xyz = Vec3x8::new(sample(), sample(), sample());
+            let (xyz, uvw) = gen_parcel(&cfg, &mut rng);
             pos.push(xyz);
-            vel.push(Vec3x8::zero());
+            vel.push(uvw);
         }
 
         Self { pos, vel, cfg }
     }
 
     pub fn step(&mut self, field: impl Fn(Vec3x8) -> Vec3x8, dt: f32) {
+        // Particle decay
+        let replace_p = (self.cfg.replace_p * dt) as f64;
+
+        let seed = rand::thread_rng().gen();
+
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+        self.pos.retain(|_| !rng.gen_bool(replace_p));
+
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(seed);
+        self.vel.retain(|_| !rng.gen_bool(replace_p));
+
+        // Particle replacement
+        for _ in self.pos.len()..self.cfg.n_parcels {
+            let (xyz, uvw) = gen_parcel(&self.cfg, &mut rng);
+            self.pos.push(xyz);
+            self.vel.push(uvw);
+        }
+
+        // Euler integration
         let dt_per_mass = Vec3x8::splat(Vec3::broadcast(dt / self.cfg.mass));
         let dt = Vec3x8::splat(Vec3::broadcast(dt));
 
@@ -217,21 +251,26 @@ impl ParticleSim {
 }
 
 fn particle_mesh(b: &mut GraphicsBuilder, sim: &ParticleSim) {
-    for &set in &sim.pos {
-        for vert in vec3x8_vertices(set, [1.; 3]) {
+    for (&pos, &vel) in sim.pos.iter().zip(&sim.vel) {
+        for vert in vec3x8_vertices(pos, Vec3x8::broadcast(vel.mag_sq())) {
             let idx = b.push_vertex(vert);
             b.push_index(idx);
         }
     }
 }
 
-fn vec3x8_vertices(pos: Vec3x8, color: [f32; 3]) -> impl Iterator<Item = Vertex> {
+fn vec3x8_vertices(pos: Vec3x8, color: Vec3x8) -> impl Iterator<Item = Vertex> {
     let x: [f32; 8] = pos.x.into();
     let y: [f32; 8] = pos.y.into();
     let z: [f32; 8] = pos.z.into();
-    x.into_iter().zip(y).zip(z).map(|((x, y), z)| Vertex {
+
+    let r: [f32; 8] = color.x.into();
+    let g: [f32; 8] = color.y.into();
+    let b: [f32; 8] = color.z.into();
+
+    x.into_iter().zip(y).zip(z).zip(r).zip(g).zip(b).map(move |(((((x, y), z), r), g), b)| Vertex {
         pos: [x, y, z],
-        color: [1.; 3],
+        color: [r, g, b],
     })
 }
 
@@ -254,11 +293,14 @@ fn unit_cube_verts() -> Vec3x8 {
 fn arrow_mesh(b: &mut GraphicsBuilder, field: impl Fn(Vec3x8) -> Vec3x8, cfg: &ArrowCfg) {
     let arrow_sep = 1. / cfg.arrow_density.cbrt();
 
-    let steps = (cfg.arrow_radius * 2. / arrow_sep) as u32;
+    let steps = (cfg.arrow_radius / arrow_sep) as u32;
 
-    let min_xyz = Vec3::broadcast(-cfg.arrow_radius * 2. + arrow_sep);
+    let min_xyz = Vec3::broadcast(-cfg.arrow_radius + arrow_sep);
 
     let unit = unit_cube_verts() * Vec3x8::splat(Vec3::broadcast(arrow_sep));
+
+    let tip_color = Vec3x8::splat(Vec3::broadcast(1.));
+    let tail_color = Vec3x8::splat(Vec3::broadcast(0.));
 
     for x in 0..steps {
         for y in 0..steps {
@@ -272,12 +314,12 @@ fn arrow_mesh(b: &mut GraphicsBuilder, field: impl Fn(Vec3x8) -> Vec3x8, cfg: &A
                 let tips = tails + field_vals;
 
                 for (tip, tail) in
-                    vec3x8_vertices(tips, [1.; 3]).zip(vec3x8_vertices(tails, [0.; 3]))
+                    vec3x8_vertices(tips, tip_color).zip(vec3x8_vertices(tails, tail_color))
                 {
                     let tail = b.push_vertex(tail);
                     let tip = b.push_vertex(tip);
-                    b.push_index(tip);
                     b.push_index(tail);
+                    b.push_index(tip);
                 }
             }
         }
