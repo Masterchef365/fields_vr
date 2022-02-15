@@ -2,7 +2,7 @@ use idek::{prelude::*, IndexBuffer, MultiPlatformCamera};
 use rand::prelude::*;
 use std::time::Instant;
 use structopt::StructOpt;
-use ultraviolet::{f32x8, Vec3, Vec3x8};
+use ultraviolet::{f32x8, Lerp, Vec3, Vec3x8};
 
 #[derive(Debug, StructOpt, Default)]
 #[structopt(name = "Fields VR", about = "Visualizes fields")]
@@ -65,9 +65,14 @@ fn point_charge(pos: Vec3x8, obj_pos: Vec3, charge: f32) -> Vec3x8 {
     charge * diff.normalized() / dist_sq
 }
 
-fn field(pos: Vec3x8) -> Vec3x8 {
-    point_charge(pos, Vec3::new(1., 1., 1.), 1.0)
-        + point_charge(pos, Vec3::new(-1., -1., -1.), -1.0)
+fn field(pos: Vec3x8, time: f32) -> Vec3x8 {
+    //let anim = time.cos();
+    //let p = Vec3::new(-1., -1., -1.).lerp(Vec3::new(-1., 1., -1.), anim);
+    let p = Vec3::new(time.cos(), time.sin(), 2.);
+
+    point_charge(pos, Vec3::new(1., 1., 1.), 1.0) + point_charge(pos, p, -1.0)
+    //+ point_charge(pos, Vec3::new(-1., 3., -1.), -3.0)
+    //+ point_charge(pos, Vec3::new(1., -3., -1.), 3.0)
 }
 
 struct FieldVisualizer {
@@ -88,7 +93,7 @@ struct FieldVisualizer {
 
 impl App<Opt> for FieldVisualizer {
     fn init(ctx: &mut Context, platform: &mut Platform, args: Opt) -> Result<Self> {
-        let present = FieldPresentation::new(&args, field);
+        let present = FieldPresentation::new(&args, |pos| field(pos, 0.));
 
         Ok(Self {
             line_vertices: ctx.vertices(&present.line_gb.vertices, true)?,
@@ -121,7 +126,10 @@ impl App<Opt> for FieldVisualizer {
         let dt = self.delta_time.elapsed();
         self.delta_time = Instant::now();
 
-        self.present.step(field, dt.as_secs_f32());
+        self.present.step(
+            |pos| field(pos, ctx.start_time().elapsed().as_secs_f32()),
+            dt.as_secs_f32(),
+        );
 
         ctx.update_indices(self.point_indices, &self.present.point_gb.indices)?;
         ctx.update_vertices(self.point_vertices, &self.present.point_gb.vertices)?;
@@ -252,7 +260,7 @@ impl ParticleSim {
 
 fn particle_mesh(b: &mut GraphicsBuilder, sim: &ParticleSim) {
     for (&pos, &vel) in sim.pos.iter().zip(&sim.vel) {
-        for vert in vec3x8_vertices(pos, Vec3x8::broadcast(vel.mag_sq())) {
+        for vert in vec3x8_vertices(pos, vel.abs()) {
             let idx = b.push_vertex(vert);
             b.push_index(idx);
         }
@@ -268,10 +276,16 @@ fn vec3x8_vertices(pos: Vec3x8, color: Vec3x8) -> impl Iterator<Item = Vertex> {
     let g: [f32; 8] = color.y.into();
     let b: [f32; 8] = color.z.into();
 
-    x.into_iter().zip(y).zip(z).zip(r).zip(g).zip(b).map(move |(((((x, y), z), r), g), b)| Vertex {
-        pos: [x, y, z],
-        color: [r, g, b],
-    })
+    x.into_iter()
+        .zip(y)
+        .zip(z)
+        .zip(r)
+        .zip(g)
+        .zip(b)
+        .map(move |(((((x, y), z), r), g), b)| Vertex {
+            pos: [x, y, z],
+            color: [r, g, b],
+        })
 }
 
 fn unit_cube_verts() -> Vec3x8 {
@@ -311,7 +325,12 @@ fn arrow_mesh(b: &mut GraphicsBuilder, field: impl Fn(Vec3x8) -> Vec3x8, cfg: &A
 
                 let field_vals = field(tails);
 
-                let tips = tails + field_vals;
+                let max_mag = 0.5;
+                let mags = field_vals.mag_sq().min(f32x8::from([max_mag; 8]));
+                let dirs = field_vals.normalized();
+                let line_vects = mags * dirs;
+
+                let tips = tails + line_vects;
 
                 for (tip, tail) in
                     vec3x8_vertices(tips, tip_color).zip(vec3x8_vertices(tails, tail_color))
