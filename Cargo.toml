@@ -1,0 +1,10 @@
+[package]
+name = "fields_vr"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+structopt = { version = "0.3", default-features = false }
+idek = { git = "https://github.com/Masterchef365/idek.git", rev = "6a5678f" }
+ultraviolet = "0.8.1"
+
