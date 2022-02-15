@@ -1,35 +1,51 @@
 use idek::{prelude::*, IndexBuffer, MultiPlatformCamera};
-use structopt::StructOpt;
-use ultraviolet::{Vec3x8, Vec3, f32x8};
+use rand::prelude::*;
 use std::time::Instant;
+use structopt::StructOpt;
+use ultraviolet::{f32x8, Vec3, Vec3x8};
 
 #[derive(Debug, StructOpt, Default)]
 #[structopt(name = "Fields VR", about = "Visualizes fields")]
 struct Opt {
+    #[structopt(flatten)]
+    arrows: ArrowCfg,
+
+    #[structopt(flatten)]
+    particles: ParticleCfg,
+
+    /// Visualize with VR
+    #[structopt(long)]
+    vr: bool,
+}
+
+#[derive(Debug, StructOpt, Default, Clone, Copy)]
+struct ArrowCfg {
     /// Arrow density per unit volume
     #[structopt(short = "d", long, default_value = "1.0")]
     arrow_density: f32,
 
     // TODO: Use a sphere instead?
     /// Half of the side length of the cube in which arrows are placed.
-    #[structopt(short = "r", long, default_value = "1.0")]
+    #[structopt(short = "r", long, default_value = "10.0")]
     arrow_radius: f32,
 
     /// Base length of arrows
     #[structopt(short = "l", long, default_value = "0.01")]
     arrow_length: f32,
+}
 
-    /// Number of particles to simulate
-    #[structopt(short = "n", long, default_value = "0.01")]
-    n_particles: usize,
+#[derive(Debug, StructOpt, Default, Clone, Copy)]
+struct ParticleCfg {
+    /// Number of parcels to simulate. Each parcel contains 8 particles.
+    #[structopt(short = "n", long, default_value = "10")]
+    n_parcels: usize,
+
+    #[structopt(short = "t", long, default_value = "10.0")]
+    domain_radius: f32,
 
     /// Particle mass
-    #[structopt(short = "n", long, default_value = "0.01")]
+    #[structopt(short = "m", long, default_value = "0.01")]
     mass: f32,
-
-    /// Visualize with VR
-    #[structopt(long)]
-    vr: bool,
 }
 
 fn main() -> Result<()> {
@@ -54,7 +70,7 @@ struct FieldVisualizer {
     point_indices: IndexBuffer,
     point_shader: Shader,
 
-    present: FieldPresentation, 
+    present: FieldPresentation,
 
     delta_time: Instant,
 
@@ -96,7 +112,7 @@ impl App<Opt> for FieldVisualizer {
         let dt = self.delta_time.elapsed();
         self.delta_time = Instant::now();
 
-        self.present.step(dt.as_secs_f32());
+        self.present.step(field, dt.as_secs_f32());
 
         ctx.update_indices(self.point_indices, &self.present.point_gb.indices)?;
         ctx.update_vertices(self.point_vertices, &self.present.point_gb.vertices)?;
@@ -132,6 +148,7 @@ struct FieldPresentation {
     line_gb: GraphicsBuilder,
     point_gb: GraphicsBuilder,
     sim: ParticleSim,
+    arrow_cfg: ArrowCfg,
 }
 
 impl FieldPresentation {
@@ -139,35 +156,58 @@ impl FieldPresentation {
         let mut line_gb = GraphicsBuilder::new();
         let mut point_gb = GraphicsBuilder::new();
 
-        let sim = ParticleSim::new(args.n_particles, args.mass);
+        let sim = ParticleSim::new(args.particles);
 
-        frame_meshes(&mut line_gb, &mut point_gb, &sim, field);
+        particle_mesh(&mut point_gb, &sim);
+        arrow_mesh(&mut line_gb, field, &args.arrows);
 
         Self {
+            arrow_cfg: args.arrows,
             sim,
             line_gb,
             point_gb,
         }
     }
 
-    pub fn step(&mut self, dt: f32) {
-        todo!()
+    pub fn step(&mut self, field: impl Fn(Vec3x8) -> Vec3x8, dt: f32) {
+        self.sim.step(&field, dt);
+
+        self.point_gb.clear();
+
+        self.line_gb.clear();
+
+        particle_mesh(&mut self.point_gb, &self.sim);
+
+        arrow_mesh(&mut self.line_gb, field, &self.arrow_cfg);
     }
 }
 
 struct ParticleSim {
-    mass: f32,
     pos: Vec<Vec3x8>,
     vel: Vec<Vec3x8>,
+    cfg: ParticleCfg,
 }
 
 impl ParticleSim {
-    pub fn new(count: usize, mass: f32) -> Self {
-        todo!()
+    pub fn new(cfg: ParticleCfg) -> Self {
+        let mut pos = Vec::with_capacity(cfg.n_parcels);
+        let mut vel = Vec::with_capacity(cfg.n_parcels);
+
+        let mut rng = rand::thread_rng();
+        for _ in 0..cfg.n_parcels {
+            let mut sample = || {
+                f32x8::from([(); 8].map(|_| rng.gen_range(-cfg.domain_radius..=cfg.domain_radius)))
+            };
+            let xyz = Vec3x8::new(sample(), sample(), sample());
+            pos.push(xyz);
+            vel.push(Vec3x8::zero());
+        }
+
+        Self { pos, vel, cfg }
     }
 
-    pub fn update(&mut self, field: impl Fn(Vec3x8) -> Vec3x8, dt: f32) {
-        let dt_per_mass = Vec3x8::splat(Vec3::broadcast(dt / self.mass));
+    pub fn step(&mut self, field: impl Fn(Vec3x8) -> Vec3x8, dt: f32) {
+        let dt_per_mass = Vec3x8::splat(Vec3::broadcast(dt / self.cfg.mass));
         let dt = Vec3x8::splat(Vec3::broadcast(dt));
 
         for (pos, vel) in self.pos.iter_mut().zip(&mut self.vel) {
@@ -177,25 +217,72 @@ impl ParticleSim {
     }
 }
 
-fn frame_meshes(
-    points: &mut GraphicsBuilder,
-    lines: &mut GraphicsBuilder,
-    sim: &ParticleSim,
-    field: impl Fn(Vec3x8) -> Vec3x8,
-) {
-    particle_mesh(points, sim);
-    arrow_mesh(lines, field);
-}
-
 fn particle_mesh(b: &mut GraphicsBuilder, sim: &ParticleSim) {
-    for set in &sim.pos {
-        let k: [f32; 8] = set.x.into();
-        //for (x, y, z) in set.x.
+    for &set in &sim.pos {
+        for vert in vec3x8_vertices(set, [1.; 3]) {
+            let idx = b.push_vertex(vert);
+            b.push_index(idx);
+        }
     }
 }
 
-fn arrow_mesh(b: &mut GraphicsBuilder, field: impl Fn(Vec3x8) -> Vec3x8) {
-    todo!()
+fn vec3x8_vertices(pos: Vec3x8, color: [f32; 3]) -> impl Iterator<Item = Vertex> {
+    let x: [f32; 8] = pos.x.into();
+    let y: [f32; 8] = pos.y.into();
+    let z: [f32; 8] = pos.z.into();
+    x.into_iter().zip(y).zip(z).map(|((x, y), z)| Vertex {
+        pos: [x, y, z],
+        color: [1.; 3],
+    })
+}
+
+fn unit_cube_verts() -> Vec3x8 {
+    let mut x = [0f32; 8];
+    let mut y = [0f32; 8];
+    let mut z = [0f32; 8];
+
+    let bittest = |i: usize, bit: u8| if (i >> bit) & 1 == 0 { 0.0 } else { 1.0 };
+
+    for i in 0..6 {
+        x[i] = bittest(i, 0);
+        y[i] = bittest(i, 1);
+        z[i] = bittest(i, 2);
+    }
+
+    Vec3x8::new(x.into(), y.into(), z.into())
+}
+
+fn arrow_mesh(b: &mut GraphicsBuilder, field: impl Fn(Vec3x8) -> Vec3x8, cfg: &ArrowCfg) {
+    let arrow_sep = 1. / cfg.arrow_density.cbrt();
+
+    let steps = (cfg.arrow_radius * 2. / arrow_sep) as u32;
+
+    let top_left_up = Vec3x8::splat(Vec3::broadcast(-cfg.arrow_radius));
+
+    let unit = unit_cube_verts() * Vec3x8::splat(Vec3::broadcast(arrow_sep));
+
+    for x in 0..steps {
+        for y in 0..steps {
+            for z in 0..steps {
+                let xyz = Vec3::new(x as f32, y as f32, z as f32);
+                let corner = xyz * arrow_sep * 2.;
+                let tails = unit + Vec3x8::splat(corner);
+
+                let field_vals = field(tails);
+
+                let tips = tails + field_vals;
+
+                for (tip, tail) in
+                    vec3x8_vertices(tips, [1.; 3]).zip(vec3x8_vertices(tails, [0.; 3]))
+                {
+                    let tail = b.push_vertex(tail);
+                    let tip = b.push_vertex(tip);
+                    b.push_index(tip);
+                    b.push_index(tail);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default, Clone, Debug)]
