@@ -26,12 +26,11 @@ struct ArrowCfg {
 
     // TODO: Use a sphere instead?
     /// Half of the side length of the cube in which arrows are placed.
-    #[structopt(short = "r", long, default_value = "10.0")]
+    #[structopt(short = "r", long, default_value = "3.0")]
     arrow_radius: f32,
-
-    /// Base length of arrows
-    #[structopt(short = "l", long, default_value = "0.01")]
-    arrow_length: f32,
+    // /// Base length of arrows
+    // #[structopt(short = "l", long, default_value = "0.01")]
+    // arrow_length: f32,
 }
 
 #[derive(Debug, StructOpt, Default, Clone, Copy)]
@@ -40,11 +39,11 @@ struct ParticleCfg {
     #[structopt(short = "n", long, default_value = "10")]
     n_parcels: usize,
 
-    #[structopt(short = "t", long, default_value = "10.0")]
+    #[structopt(short = "t", long, default_value = "3.0")]
     domain_radius: f32,
 
     /// Particle mass
-    #[structopt(short = "m", long, default_value = "0.01")]
+    #[structopt(short = "m", long, default_value = "1.0")]
     mass: f32,
 }
 
@@ -243,7 +242,7 @@ fn unit_cube_verts() -> Vec3x8 {
 
     let bittest = |i: usize, bit: u8| if (i >> bit) & 1 == 0 { 0.0 } else { 1.0 };
 
-    for i in 0..6 {
+    for i in 0..8 {
         x[i] = bittest(i, 0);
         y[i] = bittest(i, 1);
         z[i] = bittest(i, 2);
@@ -257,7 +256,7 @@ fn arrow_mesh(b: &mut GraphicsBuilder, field: impl Fn(Vec3x8) -> Vec3x8, cfg: &A
 
     let steps = (cfg.arrow_radius * 2. / arrow_sep) as u32;
 
-    let top_left_up = Vec3x8::splat(Vec3::broadcast(-cfg.arrow_radius));
+    let min_xyz = Vec3::broadcast(-cfg.arrow_radius * 2. + arrow_sep);
 
     let unit = unit_cube_verts() * Vec3x8::splat(Vec3::broadcast(arrow_sep));
 
@@ -265,7 +264,7 @@ fn arrow_mesh(b: &mut GraphicsBuilder, field: impl Fn(Vec3x8) -> Vec3x8, cfg: &A
         for y in 0..steps {
             for z in 0..steps {
                 let xyz = Vec3::new(x as f32, y as f32, z as f32);
-                let corner = xyz * arrow_sep * 2.;
+                let corner = min_xyz + xyz * arrow_sep * 2.;
                 let tails = unit + Vec3x8::splat(corner);
 
                 let field_vals = field(tails);
