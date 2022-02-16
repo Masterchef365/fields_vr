@@ -21,13 +21,21 @@ struct Opt {
 #[derive(Debug, StructOpt, Default, Clone, Copy)]
 struct ArrowCfg {
     /// Arrow density per unit volume
-    #[structopt(short = "d", long, default_value = "1.0")]
+    #[structopt(short = "d", long, default_value = "8.0")]
     arrow_density: f32,
 
     // TODO: Use a sphere instead?
     /// Half of the side length of the cube in which arrows are placed.
     #[structopt(short = "r", long, default_value = "3.0")]
     arrow_radius: f32,
+
+    /// Maximum arrow length
+    #[structopt(short = "u", long, default_value = "0.2")]
+    arrow_max_len: f32,
+
+    /// Maximum arrow length
+    #[structopt(short = "v", long, default_value = "0.05")]
+    arrow_min_len: f32,
     // /// Base length of arrows
     // #[structopt(short = "l", long, default_value = "0.01")]
     // arrow_length: f32,
@@ -36,7 +44,7 @@ struct ArrowCfg {
 #[derive(Debug, StructOpt, Default, Clone, Copy)]
 struct ParticleCfg {
     /// Number of parcels to simulate. Each parcel contains 8 particles.
-    #[structopt(short = "n", long, default_value = "10")]
+    #[structopt(short = "n", long, default_value = "5000")]
     n_parcels: usize,
 
     #[structopt(short = "t", long, default_value = "3.0")]
@@ -49,6 +57,10 @@ struct ParticleCfg {
     /// Probability the parcel will be removed each second
     #[structopt(short = "p", long, default_value = "0.99")]
     replace_p: f32,
+
+    /// Enable rainbows.
+    #[structopt(short = "l", long)]
+    rainbows: bool,
 }
 
 fn main() -> Result<()> {
@@ -88,7 +100,7 @@ struct FieldVisualizer {
 
 impl App<Opt> for FieldVisualizer {
     fn init(ctx: &mut Context, platform: &mut Platform, args: Opt) -> Result<Self> {
-        let present = FieldPresentation::new(&args, field);
+        let present = FieldPresentation::new(args, field);
 
         Ok(Self {
             line_vertices: ctx.vertices(&present.line_gb.vertices, true)?,
@@ -104,9 +116,9 @@ impl App<Opt> for FieldVisualizer {
             point_indices: ctx.indices(&present.point_gb.indices, true)?,
 
             point_shader: ctx.shader(
-                #[cfg(target = "windows")]
+                #[cfg(unix)]
                 include_bytes!("shaders/points.vert.spv"),
-                #[cfg(not(target = "windows"))]
+                #[cfg(windows)]
                 include_bytes!("shaders\\points.vert.spv"),
                 DEFAULT_FRAGMENT_SHADER,
                 Primitive::Points,
@@ -160,21 +172,21 @@ struct FieldPresentation {
     line_gb: GraphicsBuilder,
     point_gb: GraphicsBuilder,
     sim: ParticleSim,
-    arrow_cfg: ArrowCfg,
+    args: Opt,
 }
 
 impl FieldPresentation {
-    pub fn new(args: &Opt, field: impl Fn(Vec3x8) -> Vec3x8) -> Self {
+    pub fn new(args: Opt, field: impl Fn(Vec3x8) -> Vec3x8) -> Self {
         let mut line_gb = GraphicsBuilder::new();
         let mut point_gb = GraphicsBuilder::new();
 
         let sim = ParticleSim::new(args.particles);
 
-        particle_mesh(&mut point_gb, &sim);
+        particle_mesh(&mut point_gb, &sim, &args.particles);
         arrow_mesh(&mut line_gb, field, &args.arrows);
 
         Self {
-            arrow_cfg: args.arrows,
+            args,
             sim,
             line_gb,
             point_gb,
@@ -188,9 +200,9 @@ impl FieldPresentation {
 
         self.line_gb.clear();
 
-        particle_mesh(&mut self.point_gb, &self.sim);
+        particle_mesh(&mut self.point_gb, &self.sim, &self.args.particles);
 
-        arrow_mesh(&mut self.line_gb, field, &self.arrow_cfg);
+        arrow_mesh(&mut self.line_gb, field, &self.args.arrows);
     }
 }
 
@@ -253,9 +265,15 @@ impl ParticleSim {
     }
 }
 
-fn particle_mesh(b: &mut GraphicsBuilder, sim: &ParticleSim) {
+fn particle_mesh(b: &mut GraphicsBuilder, sim: &ParticleSim, cfg: &ParticleCfg) {
     for (&pos, &vel) in sim.pos.iter().zip(&sim.vel) {
-        for vert in vec3x8_vertices(pos, Vec3x8::broadcast(vel.mag_sq())) {
+        let color = if cfg.rainbows {
+            vel.abs()
+        } else {
+            Vec3x8::broadcast(vel.mag_sq())
+        };
+
+        for vert in vec3x8_vertices(pos, color) {
             let idx = b.push_vertex(vert);
             b.push_index(idx);
         }
@@ -271,10 +289,16 @@ fn vec3x8_vertices(pos: Vec3x8, color: Vec3x8) -> impl Iterator<Item = Vertex> {
     let g: [f32; 8] = color.y.into();
     let b: [f32; 8] = color.z.into();
 
-    x.into_iter().zip(y).zip(z).zip(r).zip(g).zip(b).map(move |(((((x, y), z), r), g), b)| Vertex {
-        pos: [x, y, z],
-        color: [r, g, b],
-    })
+    x.into_iter()
+        .zip(y)
+        .zip(z)
+        .zip(r)
+        .zip(g)
+        .zip(b)
+        .map(move |(((((x, y), z), r), g), b)| Vertex {
+            pos: [x, y, z],
+            color: [r, g, b],
+        })
 }
 
 fn unit_cube_verts() -> Vec3x8 {
@@ -305,6 +329,9 @@ fn arrow_mesh(b: &mut GraphicsBuilder, field: impl Fn(Vec3x8) -> Vec3x8, cfg: &A
     let tip_color = Vec3x8::splat(Vec3::broadcast(1.));
     let tail_color = Vec3x8::splat(Vec3::broadcast(0.));
 
+    let max_arrow_len = f32x8::splat(cfg.arrow_max_len);
+    let min_arrow_len = f32x8::splat(cfg.arrow_min_len);
+
     for x in 0..steps {
         for y in 0..steps {
             for z in 0..steps {
@@ -314,7 +341,10 @@ fn arrow_mesh(b: &mut GraphicsBuilder, field: impl Fn(Vec3x8) -> Vec3x8, cfg: &A
 
                 let field_vals = field(tails);
 
-                let tips = tails + field_vals;
+                let offsets = field_vals.normalized()
+                    * field_vals.mag().min(max_arrow_len).max(min_arrow_len);
+
+                let tips = tails + offsets;
 
                 for (tip, tail) in
                     vec3x8_vertices(tips, tip_color).zip(vec3x8_vertices(tails, tail_color))
