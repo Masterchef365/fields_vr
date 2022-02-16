@@ -77,9 +77,13 @@ fn point_charge(pos: Vec3x8, obj_pos: Vec3, charge: f32) -> Vec3x8 {
     charge * diff.normalized() / dist_sq
 }
 
-fn field(pos: Vec3x8) -> Vec3x8 {
-    point_charge(pos, Vec3::new(1., 1., 1.), 1.0)
-        + point_charge(pos, Vec3::new(-1., -1., -1.), -1.0)
+fn field(mut pos: Vec3x8) -> Vec3x8 {
+    for _ in 0..4 {
+        pos += Vec3x8::new(pos.y.cos(), pos.z.sin(), (pos.x * 3.).sin())
+    }
+    pos
+    //point_charge(pos, Vec3::new(1., 1., 1.), 1.0)
+        //+ point_charge(pos, Vec3::new(-1., -1., -1.), -1.0)
 }
 
 struct FieldVisualizer {
