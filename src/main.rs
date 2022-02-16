@@ -109,7 +109,10 @@ impl App<Opt> for FieldVisualizer {
             point_indices: ctx.indices(&present.point_gb.indices, true)?,
 
             point_shader: ctx.shader(
+                #[cfg(target = "windows")]
                 include_bytes!("shaders/points.vert.spv"),
+                #[cfg(not(target = "windows"))]
+                include_bytes!("shaders\\points.vert.spv"),
                 DEFAULT_FRAGMENT_SHADER,
                 Primitive::Points,
             )?,
